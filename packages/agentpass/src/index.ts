@@ -2,10 +2,9 @@ import { DurableObject } from "cloudflare:workers"
 import { Hono } from "hono"
 
 export interface Env {
-  API_KEYS: KVNamespace
-  RATE_LIMITS: KVNamespace
   RATE_LIMITER: DurableObjectNamespace<RateLimiter>
   USAGE_TRACKER: DurableObjectNamespace<UsageTracker>
+  KEY_STORE: DurableObjectNamespace<KeyStore>
   ADMIN_SECRET: string
 }
 
@@ -31,8 +30,6 @@ interface UsageRecord {
   cost: number
 }
 
-// ─── Key Generation ─────────────────────────────────────────────────────────
-
 function generateApiKey(environment: "live" | "test" = "live"): string {
   const bytes = new Uint8Array(24)
   crypto.getRandomValues(bytes)
@@ -40,7 +37,61 @@ function generateApiKey(environment: "live" | "test" = "live"): string {
   return `ocp_${environment}_${chars}`
 }
 
-// ─── Auth Middleware ─────────────────────────────────────────────────────────
+// ─── KeyStore Durable Object ────────────────────────────────────────────────
+
+export class KeyStore extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env)
+    ctx.blockConcurrencyWhile(async () => {
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS api_keys (
+          key TEXT PRIMARY KEY,
+          data TEXT NOT NULL
+        )
+      `)
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS waitlist (
+          email TEXT PRIMARY KEY,
+          data TEXT NOT NULL
+        )
+      `)
+    })
+  }
+
+  async getKey(key: string): Promise<ApiKey | null> {
+    const rows = this.ctx.storage.sql.exec<{ data: string }>(
+      `SELECT data FROM api_keys WHERE key = ?`, key,
+    ).toArray()
+    if (!rows[0]) return null
+    return JSON.parse(rows[0].data)
+  }
+
+  async putKey(key: string, data: ApiKey) {
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO api_keys (key, data) VALUES (?, ?)`,
+      key, JSON.stringify(data),
+    )
+  }
+
+  async deleteKey(key: string) {
+    this.ctx.storage.sql.exec(`DELETE FROM api_keys WHERE key = ?`, key)
+  }
+
+  async listKeys(): Promise<ApiKey[]> {
+    return this.ctx.storage.sql.exec<{ data: string }>(
+      `SELECT data FROM api_keys ORDER BY rowid DESC LIMIT 100`,
+    ).toArray().map((r) => JSON.parse(r.data))
+  }
+
+  async addToWaitlist(email: string, data: Record<string, unknown>) {
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO waitlist (email, data) VALUES (?, ?)`,
+      email, JSON.stringify(data),
+    )
+  }
+}
+
+// ─── Auth Helpers ───────────────────────────────────────────────────────────
 
 async function authenticateRequest(
   authHeader: string | undefined,
@@ -51,7 +102,8 @@ async function authenticateRequest(
   }
 
   const token = authHeader.slice(7)
-  const keyData = await env.API_KEYS.get<ApiKey>(token, "json")
+  const store = env.KEY_STORE.get(env.KEY_STORE.idFromName("global"))
+  const keyData = await store.getKey(token)
 
   if (!keyData) return { key: null, error: "Invalid API key" }
   if (keyData.revokedAt) return { key: null, error: "API key has been revoked" }
@@ -85,9 +137,9 @@ export class RateLimiter extends DurableObject<Env> {
           timestamp INTEGER NOT NULL
         )
       `)
-      this.ctx.storage.sql.exec(`
-        CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(timestamp)
-      `)
+      this.ctx.storage.sql.exec(
+        `CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(timestamp)`,
+      )
     })
   }
 
@@ -105,20 +157,11 @@ export class RateLimiter extends DurableObject<Env> {
       const oldest = this.ctx.storage.sql.exec<{ timestamp: number }>(
         `SELECT MIN(timestamp) as timestamp FROM requests WHERE timestamp >= ?`, windowStart,
       ).one()
-      return {
-        allowed: false,
-        remaining: 0,
-        resetAt: oldest.timestamp + windowMs,
-      }
+      return { allowed: false, remaining: 0, resetAt: oldest.timestamp + windowMs }
     }
 
     this.ctx.storage.sql.exec(`INSERT INTO requests (timestamp) VALUES (?)`, now)
-
-    return {
-      allowed: true,
-      remaining: limit - count - 1,
-      resetAt: now + windowMs,
-    }
+    return { allowed: true, remaining: limit - count - 1, resetAt: now + windowMs }
   }
 }
 
@@ -139,9 +182,9 @@ export class UsageTracker extends DurableObject<Env> {
           cost REAL DEFAULT 0
         )
       `)
-      this.ctx.storage.sql.exec(`
-        CREATE INDEX IF NOT EXISTS idx_usage_key ON usage(key_id, timestamp)
-      `)
+      this.ctx.storage.sql.exec(
+        `CREATE INDEX IF NOT EXISTS idx_usage_key ON usage(key_id, timestamp)`,
+      )
     })
   }
 
@@ -163,15 +206,13 @@ export class UsageTracker extends DurableObject<Env> {
     models: Record<string, number>
   }> {
     const since = sinceMs ?? Date.now() - 30 * 24 * 60 * 60 * 1000
-
     const stats = this.ctx.storage.sql.exec<{
       total_requests: number
       total_input: number
       total_output: number
       total_cost: number
     }>(`
-      SELECT
-        COUNT(*) as total_requests,
+      SELECT COUNT(*) as total_requests,
         COALESCE(SUM(tokens_input), 0) as total_input,
         COALESCE(SUM(tokens_output), 0) as total_output,
         COALESCE(SUM(cost), 0) as total_cost
@@ -180,14 +221,11 @@ export class UsageTracker extends DurableObject<Env> {
 
     const modelRows = this.ctx.storage.sql.exec<{ model: string; count: number }>(`
       SELECT model, COUNT(*) as count FROM usage
-      WHERE key_id = ? AND timestamp >= ?
-      GROUP BY model ORDER BY count DESC
+      WHERE key_id = ? AND timestamp >= ? GROUP BY model ORDER BY count DESC
     `, keyId, since).toArray()
 
     const models: Record<string, number> = {}
-    for (const row of modelRows) {
-      models[row.model] = row.count
-    }
+    for (const row of modelRows) models[row.model] = row.count
 
     return {
       totalRequests: stats.total_requests,
@@ -205,13 +243,10 @@ const app = new Hono<{ Bindings: Env }>()
 
 app.get("/health", (c) => c.json({ healthy: true, service: "agentpass" }))
 
-// ─── Key Management (Admin) ─────────────────────────────────────────────────
-
 app.post("/keys", async (c) => {
   if (!isAdmin(c.req.header("Authorization"), c.env)) {
     return c.json({ error: "Unauthorized" }, 401)
   }
-
   const body = await c.req.json()
   const key = generateApiKey(body.environment ?? "live")
   const keyData: ApiKey = {
@@ -226,29 +261,31 @@ app.post("/keys", async (c) => {
     expiresAt: body.expiresIn ? Date.now() + body.expiresIn : undefined,
   }
 
-  await c.env.API_KEYS.put(key, JSON.stringify(keyData), {
-    expirationTtl: body.expiresIn ? Math.ceil(body.expiresIn / 1000) : undefined,
-  })
-
+  const store = c.env.KEY_STORE.get(c.env.KEY_STORE.idFromName("global"))
+  await store.putKey(key, keyData)
   return c.json({ id: keyData.id, key, name: keyData.name, createdAt: keyData.createdAt }, 201)
+})
+
+app.get("/keys", async (c) => {
+  if (!isAdmin(c.req.header("Authorization"), c.env)) {
+    return c.json({ error: "Unauthorized" }, 401)
+  }
+  const store = c.env.KEY_STORE.get(c.env.KEY_STORE.idFromName("global"))
+  const keys = await store.listKeys()
+  return c.json(keys.map((k) => ({ id: k.id, name: k.name, createdAt: k.createdAt, revokedAt: k.revokedAt })))
 })
 
 app.delete("/keys/:key", async (c) => {
   if (!isAdmin(c.req.header("Authorization"), c.env)) {
     return c.json({ error: "Unauthorized" }, 401)
   }
-
-  const key = c.req.param("key")
-  const keyData = await c.env.API_KEYS.get<ApiKey>(key, "json")
+  const store = c.env.KEY_STORE.get(c.env.KEY_STORE.idFromName("global"))
+  const keyData = await store.getKey(c.req.param("key"))
   if (!keyData) return c.json({ error: "Key not found" }, 404)
-
   keyData.revokedAt = Date.now()
-  await c.env.API_KEYS.put(key, JSON.stringify(keyData))
-
+  await store.putKey(keyData.key, keyData)
   return c.json({ revoked: true, id: keyData.id })
 })
-
-// ─── Validation Endpoint ────────────────────────────────────────────────────
 
 app.post("/validate", async (c) => {
   const { key, error } = await authenticateRequest(c.req.header("Authorization"), c.env)
@@ -266,7 +303,8 @@ app.post("/validate", async (c) => {
     }, 429)
   }
 
-  await c.env.API_KEYS.put(key.key, JSON.stringify({ ...key, lastUsedAt: Date.now() }))
+  const store = c.env.KEY_STORE.get(c.env.KEY_STORE.idFromName("global"))
+  await store.putKey(key.key, { ...key, lastUsedAt: Date.now() })
 
   return c.json({
     valid: true,
@@ -277,12 +315,9 @@ app.post("/validate", async (c) => {
   })
 })
 
-// ─── Usage Tracking ─────────────────────────────────────────────────────────
-
 app.post("/usage", async (c) => {
   const { key, error } = await authenticateRequest(c.req.header("Authorization"), c.env)
   if (!key) return c.json({ valid: false, error }, 401)
-
   const body = await c.req.json()
   const tracker = c.env.USAGE_TRACKER.get(c.env.USAGE_TRACKER.idFromName("global"))
   await tracker.record({
@@ -292,7 +327,6 @@ app.post("/usage", async (c) => {
     model: body.model ?? "unknown",
     cost: body.cost ?? 0,
   })
-
   return c.json({ recorded: true })
 })
 
@@ -300,17 +334,13 @@ app.get("/usage/:keyId", async (c) => {
   if (!isAdmin(c.req.header("Authorization"), c.env)) {
     return c.json({ error: "Unauthorized" }, 401)
   }
-
   const tracker = c.env.USAGE_TRACKER.get(c.env.USAGE_TRACKER.idFromName("global"))
   const summary = await tracker.getSummary(c.req.param("keyId"))
   return c.json(summary)
 })
 
-// ─── Tally Webhook Handler ──────────────────────────────────────────────────
-
 app.post("/webhooks/tally", async (c) => {
   const payload = await c.req.json()
-
   if (payload.eventType === "FORM_RESPONSE") {
     const fields: Record<string, string> = {}
     for (const field of payload.data?.fields ?? []) {
@@ -318,25 +348,19 @@ app.post("/webhooks/tally", async (c) => {
         fields[field.label.toLowerCase().replace(/\s+/g, "_")] = String(field.value)
       }
     }
-
     if (fields.email) {
-      await c.env.API_KEYS.put(
-        `waitlist:${fields.email}`,
-        JSON.stringify({
-          email: fields.email,
-          name: fields.name ?? "",
-          useCase: fields.use_case ?? "",
-          submittedAt: Date.now(),
-          formId: payload.data?.formId,
-        }),
-      )
+      const store = c.env.KEY_STORE.get(c.env.KEY_STORE.idFromName("global"))
+      await store.addToWaitlist(fields.email, {
+        email: fields.email,
+        name: fields.name ?? "",
+        useCase: fields.use_case ?? "",
+        submittedAt: Date.now(),
+        formId: payload.data?.formId,
+      })
     }
   }
-
   return c.json({ received: true })
 })
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function parseWindow(window: string): number {
   const match = window.match(/^(\d+)(s|m|h|d)$/)

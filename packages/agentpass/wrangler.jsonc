@@ -7,20 +7,17 @@
   "observability": {
     "enabled": true
   },
-  "kv_namespaces": [
-    { "binding": "API_KEYS", "id": "placeholder-api-keys" },
-    { "binding": "RATE_LIMITS", "id": "placeholder-rate-limits" }
-  ],
   "durable_objects": {
     "bindings": [
       { "name": "RATE_LIMITER", "class_name": "RateLimiter" },
-      { "name": "USAGE_TRACKER", "class_name": "UsageTracker" }
+      { "name": "USAGE_TRACKER", "class_name": "UsageTracker" },
+      { "name": "KEY_STORE", "class_name": "KeyStore" }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["RateLimiter", "UsageTracker"]
+      "new_sqlite_classes": ["RateLimiter", "UsageTracker", "KeyStore"]
     }
   ]
 }
