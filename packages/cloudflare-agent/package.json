@@ -1,0 +1,23 @@
+{
+  "name": "@opencode-ai/cloudflare-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Workers Agent for OpenCode — durable AI agents on the edge",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "agents": "^0.1.0",
+    "@openrouter/ai-sdk-provider": "1.5.2",
+    "ai": "catalog:",
+    "hono": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "typescript": "catalog:",
+    "wrangler": "^3.0.0"
+  }
+}

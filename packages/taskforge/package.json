@@ -1,0 +1,20 @@
+{
+  "name": "@opencode-ai/taskforge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TaskForge — durable task queue and workflow engine on Cloudflare Workers",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "typescript": "catalog:",
+    "wrangler": "^3.0.0"
+  }
+}

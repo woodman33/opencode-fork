@@ -1,0 +1,148 @@
+---
+title: Continuum
+description: Platform architecture for TaskForge, AgentPass, and edge agents.
+---
+
+Continuum is the platform layer built on top of OpenCode. It adds durable task queues, authentication, and edge-deployed AI agents using Cloudflare Workers.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│              CONTINUUM PLATFORM             │
+├─────────────────────────────────────────────┤
+│                                             │
+│   OpenCode          TaskForge    AgentPass  │
+│   (AI Agent)        (Tasks)      (Auth)     │
+│       │                │            │       │
+│       └───── Cloudflare Workers ────┘       │
+│              Durable Objects                │
+│              KV / R2 Storage                │
+│                                             │
+│   ┌─────────── Provider Layer ───────────┐  │
+│   │  OpenRouter  │  Workers AI  │ Direct │  │
+│   └──────────────────────────────────────┘  │
+│                                             │
+│   ┌─────────── Integrations ─────────────┐  │
+│   │  Tally  │  GitHub  │  Slack  │  Docs │  │
+│   └──────────────────────────────────────┘  │
+│                                             │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## Components
+
+| Component | Package | Purpose |
+|-----------|---------|---------|
+| **OpenCode** | `packages/opencode` | Core AI coding agent |
+| **Cloudflare Agent** | `packages/cloudflare-agent` | Edge-deployed agent via Durable Objects |
+| **TaskForge** | `packages/taskforge` | Durable task queue + workflow engine |
+| **AgentPass** | `packages/agentpass` | API key management + rate limiting |
+
+---
+
+## TaskForge
+
+Durable task queue built on Cloudflare Durable Objects with SQLite storage. Supports priority queues, automatic retries with exponential backoff, and multi-step workflows.
+
+```bash
+# Start TaskForge locally
+cd packages/taskforge
+wrangler dev
+```
+
+### API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/tasks` | Enqueue a task |
+| GET | `/tasks` | List tasks (filter by status, type) |
+| GET | `/tasks/:id` | Get task details |
+| POST | `/tasks/:id/cancel` | Cancel a pending task |
+| POST | `/tasks/:id/retry` | Retry a failed task |
+| GET | `/stats` | Queue statistics |
+| POST | `/workflows` | Create a multi-step workflow |
+| GET | `/workflows/:id` | Get workflow status |
+
+### Task types
+
+- `code-gen` — Generate code from a prompt
+- `review` — Review code changes
+- `deploy` — Deploy to target environment
+- `agent-chain` — Multi-agent orchestration
+
+---
+
+## AgentPass
+
+Authentication and rate limiting layer. Manages API keys with the `ocp_` prefix format.
+
+```bash
+# Start AgentPass locally
+cd packages/agentpass
+wrangler dev
+```
+
+### Key format
+
+```
+ocp_<environment>_<random-hex>
+```
+
+### API
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/keys` | Create API key (admin) |
+| DELETE | `/keys/:key` | Revoke key (admin) |
+| POST | `/validate` | Validate key + check rate limit |
+| POST | `/usage` | Record token usage |
+| GET | `/usage/:keyId` | Usage summary (admin) |
+| POST | `/webhooks/tally` | Tally form webhook handler |
+
+---
+
+## OpenRouter integration
+
+OpenRouter is already built into OpenCode as a first-class provider with access to 350+ models.
+
+```json title="opencode.json"
+{
+  "provider": {
+    "openrouter": {}
+  }
+}
+```
+
+Set `OPENROUTER_API_KEY` in your environment to enable it.
+
+### Multi-agent patterns
+
+Use different models for different agent roles:
+
+| Role | Model | Why |
+|------|-------|-----|
+| Planner | `anthropic/claude-sonnet-4-5` | Deep reasoning |
+| Executor | `anthropic/claude-haiku-4-5` | Fast, cost-effective |
+| Reviewer | `openai/gpt-4o` | Strong analysis |
+
+---
+
+## Deploy
+
+All Continuum services deploy to Cloudflare Workers:
+
+```bash
+# Deploy each service
+cd packages/cloudflare-agent && wrangler deploy
+cd packages/taskforge && wrangler deploy
+cd packages/agentpass && wrangler deploy
+```
+
+:::note
+Deployment requires `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`.
+:::
