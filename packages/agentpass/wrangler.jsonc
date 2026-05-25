@@ -1,0 +1,25 @@
+{
+  "name": "agentpass",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    { "binding": "API_KEYS", "id": "placeholder-api-keys" },
+    { "binding": "RATE_LIMITS", "id": "placeholder-rate-limits" }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "RATE_LIMITER", "class_name": "RateLimiter" },
+      { "name": "USAGE_TRACKER", "class_name": "UsageTracker" }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["RateLimiter", "UsageTracker"]
+    }
+  ]
+}

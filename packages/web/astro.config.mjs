@@ -87,6 +87,11 @@ export default defineConfig({
           label: "Develop",
           items: ["sdk", "server", "plugins", "ecosystem"],
         },
+
+        {
+          label: "Continuum",
+          items: ["continuum"],
+        },
       ],
       components: {
         Hero: "./src/components/Hero.astro",
